@@ -1,0 +1,75 @@
+name: Build unsigned IPA
+
+# 用法：
+#   1. 把整个 gaychou-ios 目录推到 GitHub 仓库（默认分支 main 或 master）
+#   2. 打开 Actions → "Build unsigned IPA" → Run workflow
+#   3. 跑完后在该次运行页面底部 Artifacts 下载 gayChou-unsigned-ipa.zip
+#   4. 解压得到 gayChou-unsigned.ipa，用 AltStore / Sideloadly / TrollStore 侧载
+#
+# 说明：这是「不签名」的构建，不需要 Apple 开发者账号，也不需要证书。
+#       未签名 IPA 不能直接点开安装，必须用侧载工具签名后安装。
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build (unsigned)
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Install XcodeGen
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          xcodegen --version
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build app without code signing
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project gayChou.xcodeproj \
+            -scheme gayChou \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package into unsigned IPA
+        run: |
+          set -euo pipefail
+          APP="build/Build/Products/Release-iphoneos/gayChou.app"
+          if [ ! -d "$APP" ]; then
+            echo "::error::找不到构建产物 $APP"
+            find build -name "*.app" -maxdepth 6 || true
+            exit 1
+          fi
+          rm -rf out && mkdir -p out/Payload
+          cp -R "$APP" out/Payload/
+          cd out
+          zip -qry gayChou-unsigned.ipa Payload
+          ls -lh gayChou-unsigned.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gayChou-unsigned-ipa
+          path: out/gayChou-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 30
