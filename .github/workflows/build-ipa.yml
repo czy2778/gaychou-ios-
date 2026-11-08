@@ -1,1 +1,131 @@
+name: Build unsigned IPA
 
+# 支持两种仓库形态：
+#   A) 根目录直接是源码（有 project.yml）
+#   B) 根目录只上传了 gaychou-ios.zip（本工作流会自动解压）
+#
+# 用法：仓库 → Actions → Build unsigned IPA → Run workflow
+#      成功：运行页面底部 Artifacts 下载 gayChou-unsigned-ipa.zip
+#      失败：下载 build-log 这个 artifact，里面是完整编译日志
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build (unsigned)
+    # 注意：macos-14 在部分账号/时间点已不可用（会直接 cancelled、不分配 runner），
+    # 这里固定用 macos-latest。
+    runs-on: macos-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show environment
+        run: |
+          xcodebuild -version || true
+          sw_vers || true
+          ls -la
+
+      - name: Ensure sources (auto-unzip if needed)
+        run: |
+          set -euo pipefail
+
+          if [ -f project.yml ]; then
+            echo "✅ 根目录已有 project.yml，跳过解压"
+            exit 0
+          fi
+
+          ZIP=$(ls -1 *.zip 2>/dev/null | head -n1 || true)
+          if [ -z "$ZIP" ]; then
+            echo "::error::根目录既没有 project.yml，也没有 zip 文件"
+            exit 1
+          fi
+
+          echo "发现压缩包：$ZIP，开始解压"
+          rm -rf _unpack && mkdir -p _unpack
+          unzip -q "$ZIP" -d _unpack
+
+          ROOT=$(dirname "$(find _unpack -maxdepth 4 -name project.yml | head -n1)")
+          if [ -z "$ROOT" ] || [ "$ROOT" = "." ]; then
+            echo "::error::压缩包里没找到 project.yml"
+            find _unpack -maxdepth 3 || true
+            exit 1
+          fi
+
+          echo "源码目录：$ROOT"
+          shopt -s dotglob
+          for item in "$ROOT"/*; do
+            if [ "$(basename "$item")" = ".github" ]; then
+              continue
+            fi
+            cp -R "$item" .
+          done
+
+          rm -f "$ZIP"
+          rm -rf _unpack
+          echo "--- 解压后根目录 ---"
+          ls -la
+
+      - name: Install XcodeGen
+        run: |
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          xcodegen --version
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build app without code signing
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project gayChou.xcodeproj \
+            -scheme gayChou \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tee build.log
+
+      - name: Package into unsigned IPA
+        if: success()
+        run: |
+          set -euo pipefail
+          APP="build/Build/Products/Release-iphoneos/gayChou.app"
+          if [ ! -d "$APP" ]; then
+            echo "::error::找不到构建产物 $APP"
+            find build -name "*.app" -maxdepth 6 || true
+            exit 1
+          fi
+          rm -rf out && mkdir -p out/Payload
+          cp -R "$APP" out/Payload/
+          cd out
+          zip -qry gayChou-unsigned.ipa Payload
+          ls -lh gayChou-unsigned.ipa
+
+      - name: Upload IPA artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gayChou-unsigned-ipa
+          path: out/gayChou-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: warn
+          retention-days: 14
