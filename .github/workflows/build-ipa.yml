@@ -1,17 +1,20 @@
 name: Build unsigned IPA
 
-# 支持两种仓库形态：
-#   A) 根目录直接是源码（有 project.yml）
-#   B) 根目录只有 gaychou-ios.zip（本工作流自动解压，且容错 unzip 的警告退出码）
+# 源码来源优先级：
+#   1. 仓库根目录有 project.yml  → 用仓库源码
+#   2. 否则                      → 从 SRC_URL 下载最新源码包
 #
 # 用法：仓库 → Actions → Build unsigned IPA → Run workflow
 #   成功：底部 Artifacts 下载 gayChou-unsigned-ipa.zip
-#   失败：红色报错里会带 "::error::" 标记的真实原因（自动转成 annotation）
+#   失败：红色报错的 annotation 里带真实编译错误
 
 on:
   push:
     branches: [main, master]
   workflow_dispatch:
+
+env:
+  SRC_URL: https://aly.gaychou.top/dl/gaychou-ios.zip
 
 jobs:
   build:
@@ -30,44 +33,34 @@ jobs:
           sw_vers || true
           ls -la
 
-      - name: Ensure sources (auto-unzip if needed)
+      - name: Ensure sources
         shell: bash
         run: |
           LOG="${RUNNER_TEMP:-/tmp}/ensure.log"
           exec > >(tee -a "$LOG") 2>&1
 
           if [ -f project.yml ]; then
-            echo "OK: 根目录已有 project.yml，跳过解压"
+            echo "OK: 仓库根目录已有源码"
             exit 0
           fi
 
-          ZIP=$(ls -1 *.zip 2>/dev/null | head -n1 || true)
-          if [ -z "$ZIP" ]; then
-            echo "::error::根目录既没有 project.yml，也没有 zip 文件"
-            exit 1
-          fi
-
-          echo "发现压缩包：$ZIP"
+          echo "仓库根目录没有源码，从 $SRC_URL 下载"
           rm -rf _unpack
           mkdir -p _unpack
+          rm -f _src.zip
 
-          # macOS 的 unzip 在遇到 warning 时会返回 1，用 set -e 会误杀；
-          # 这里允许非 0，后面再用 project.yml 是否存在来判断。
-          unzip -o -q "$ZIP" -d _unpack || echo "unzip 返回非 0（忽略），继续检查内容"
+          if ! curl -fsSL --retry 3 -o _src.zip "$SRC_URL"; then
+            echo "::error::下载源码包失败：$SRC_URL"
+            exit 1
+          fi
+          ls -lh _src.zip
+
+          # macOS 的 unzip 遇 warning 会返回非 0，这里不当作致命错误
+          unzip -o -q _src.zip -d _unpack || echo "unzip 返回非 0（忽略）"
 
           SRC=$(find _unpack -name project.yml -type f 2>/dev/null | head -n 1 || true)
-
-          # 兜底：仓库里的 zip 若缺失/损坏，直接从发布地址拉一份
           if [ -z "$SRC" ]; then
-            echo "仓库 zip 里没有源码，尝试从发布地址回退下载"
-            if curl -fsSL -o _fallback.zip "https://aly.gaychou.top/dl/gaychou-ios.zip"; then
-              unzip -o -q _fallback.zip -d _unpack || true
-              SRC=$(find _unpack -name project.yml -type f 2>/dev/null | head -n 1 || true)
-            fi
-          fi
-
-          if [ -z "$SRC" ]; then
-            echo "::error::解压后找不到 project.yml"
+            echo "::error::源码包里找不到 project.yml"
             find _unpack -maxdepth 3 2>/dev/null || true
             exit 1
           fi
@@ -84,12 +77,12 @@ jobs:
             cp -R "$item" .
           done
 
-          rm -f "$ZIP"
+          rm -f _src.zip
           rm -rf _unpack
 
           ls -la
           if [ ! -f project.yml ]; then
-            echo "::error::复制后根目录仍无 project.yml"
+            echo "::error::源码复制后根目录仍无 project.yml"
             exit 1
           fi
           echo "OK: 源码已就位"
@@ -136,7 +129,7 @@ jobs:
         run: |
           LOG="${RUNNER_TEMP:-/tmp}/build.log"
           if [ -f "$LOG" ]; then
-            ERRORS=$(grep -E "(error:|fatal error:|Swift Compiler Error)" "$LOG" | head -n 15 | tr '\n' '|')
+            ERRORS=$(grep -E "(error:|fatal error:|Swift Compiler Error)" "$LOG" | head -n 12 | tr '\n' '|')
             if [ -n "$ERRORS" ]; then
               echo "::error::编译错误：$ERRORS"
             else
